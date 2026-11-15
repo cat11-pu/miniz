@@ -1213,6 +1213,27 @@ static int mz_stat64(const char *path, struct __stat64 *buffer)
         return &MZ_ZIP_ARRAY_ELEMENT(&pZip->m_pState->m_central_dir, mz_uint8, MZ_ZIP_ARRAY_ELEMENT(&pZip->m_pState->m_central_dir_offsets, mz_uint32, file_index));
     }
 
+    static mz_bool mz_zip_get_file_data_ofs(mz_zip_archive *pZip, mz_uint64 local_header_ofs,
+                                            mz_uint32 local_filename_len, mz_uint32 local_extra_len,
+                                            mz_uint64 comp_size, mz_uint64 *pData_ofs)
+    {
+        mz_uint64 local_header_size, data_ofs;
+
+        local_header_size = (mz_uint64)MZ_ZIP_LOCAL_DIR_HEADER_SIZE + local_filename_len + local_extra_len;
+        if (local_header_ofs > pZip->m_archive_size)
+            return MZ_FALSE;
+        if (local_header_size > pZip->m_archive_size - local_header_ofs)
+            return MZ_FALSE;
+
+        data_ofs = local_header_ofs + local_header_size;
+        if (comp_size > pZip->m_archive_size - data_ofs)
+            return MZ_FALSE;
+
+        if (pData_ofs)
+            *pData_ofs = data_ofs;
+        return MZ_TRUE;
+    }
+
     mz_bool mz_zip_reader_is_file_encrypted(mz_zip_archive *pZip, mz_uint file_index)
     {
         mz_uint m_bit_flag;
@@ -1602,8 +1623,10 @@ static int mz_stat64(const char *path, struct __stat64 *buffer)
         if (MZ_READ_LE32(pLocal_header) != MZ_ZIP_LOCAL_DIR_HEADER_SIG)
             return mz_zip_set_error(pZip, MZ_ZIP_INVALID_HEADER_OR_CORRUPTED);
 
-        cur_file_ofs += (mz_uint64)(MZ_ZIP_LOCAL_DIR_HEADER_SIZE) + MZ_READ_LE16(pLocal_header + MZ_ZIP_LDH_FILENAME_LEN_OFS) + MZ_READ_LE16(pLocal_header + MZ_ZIP_LDH_EXTRA_LEN_OFS);
-        if ((cur_file_ofs + file_stat.m_comp_size) > pZip->m_archive_size)
+        if (!mz_zip_get_file_data_ofs(pZip, cur_file_ofs,
+                                      MZ_READ_LE16(pLocal_header + MZ_ZIP_LDH_FILENAME_LEN_OFS),
+                                      MZ_READ_LE16(pLocal_header + MZ_ZIP_LDH_EXTRA_LEN_OFS),
+                                      file_stat.m_comp_size, &cur_file_ofs))
             return mz_zip_set_error(pZip, MZ_ZIP_INVALID_HEADER_OR_CORRUPTED);
 
         if ((flags & MZ_ZIP_FLAG_COMPRESSED_DATA) || (!file_stat.m_method))
@@ -1814,8 +1837,10 @@ static int mz_stat64(const char *path, struct __stat64 *buffer)
         if (MZ_READ_LE32(pLocal_header) != MZ_ZIP_LOCAL_DIR_HEADER_SIG)
             return mz_zip_set_error(pZip, MZ_ZIP_INVALID_HEADER_OR_CORRUPTED);
 
-        cur_file_ofs += (mz_uint64)(MZ_ZIP_LOCAL_DIR_HEADER_SIZE) + MZ_READ_LE16(pLocal_header + MZ_ZIP_LDH_FILENAME_LEN_OFS) + MZ_READ_LE16(pLocal_header + MZ_ZIP_LDH_EXTRA_LEN_OFS);
-        if ((cur_file_ofs + file_stat.m_comp_size) > pZip->m_archive_size)
+        if (!mz_zip_get_file_data_ofs(pZip, cur_file_ofs,
+                                      MZ_READ_LE16(pLocal_header + MZ_ZIP_LDH_FILENAME_LEN_OFS),
+                                      MZ_READ_LE16(pLocal_header + MZ_ZIP_LDH_EXTRA_LEN_OFS),
+                                      file_stat.m_comp_size, &cur_file_ofs))
             return mz_zip_set_error(pZip, MZ_ZIP_INVALID_HEADER_OR_CORRUPTED);
 
         /* Decompress the file either directly from memory or from a file input buffer. */
@@ -2056,8 +2081,10 @@ static int mz_stat64(const char *path, struct __stat64 *buffer)
             return NULL;
         }
 
-        pState->cur_file_ofs += (mz_uint64)(MZ_ZIP_LOCAL_DIR_HEADER_SIZE) + MZ_READ_LE16(pLocal_header + MZ_ZIP_LDH_FILENAME_LEN_OFS) + MZ_READ_LE16(pLocal_header + MZ_ZIP_LDH_EXTRA_LEN_OFS);
-        if ((pState->cur_file_ofs + pState->file_stat.m_comp_size) > pZip->m_archive_size)
+        if (!mz_zip_get_file_data_ofs(pZip, pState->cur_file_ofs,
+                                      MZ_READ_LE16(pLocal_header + MZ_ZIP_LDH_FILENAME_LEN_OFS),
+                                      MZ_READ_LE16(pLocal_header + MZ_ZIP_LDH_EXTRA_LEN_OFS),
+                                      pState->file_stat.m_comp_size, &pState->cur_file_ofs))
         {
             mz_zip_set_error(pZip, MZ_ZIP_INVALID_HEADER_OR_CORRUPTED);
             pZip->m_pFree(pZip->m_pAlloc_opaque, pState);
@@ -2069,7 +2096,7 @@ static int mz_stat64(const char *path, struct __stat64 *buffer)
         {
             pState->pRead_buf = (mz_uint8 *)pZip->m_pState->m_pMem + pState->cur_file_ofs;
             pState->read_buf_size = pState->read_buf_avail = pState->file_stat.m_comp_size;
-            pState->comp_remaining = pState->file_stat.m_comp_size;
+            pState->comp_remaining = (!((flags & MZ_ZIP_FLAG_COMPRESSED_DATA) || (!pState->file_stat.m_method))) ? 0 : pState->file_stat.m_comp_size;
         }
         else
         {
@@ -2202,6 +2229,13 @@ static int mz_stat64(const char *path, struct __stat64 *buffer)
                     pState->status = tinfl_decompress(&pState->inflator, (const mz_uint8 *)pState->pRead_buf + pState->read_buf_ofs, &in_buf_size, (mz_uint8 *)pState->pWrite_buf, pWrite_buf_cur, &out_buf_size, pState->comp_remaining ? TINFL_FLAG_HAS_MORE_INPUT : 0);
                     pState->read_buf_avail -= in_buf_size;
                     pState->read_buf_ofs += in_buf_size;
+
+                    if ((pState->status == TINFL_STATUS_NEEDS_MORE_INPUT) && (!in_buf_size) && (!out_buf_size) && (!pState->read_buf_avail) && (!pState->comp_remaining))
+                    {
+                        mz_zip_set_error(pState->pZip, MZ_ZIP_DECOMPRESSION_FAILED);
+                        pState->status = TINFL_STATUS_FAILED;
+                        break;
+                    }
 
                     /* Update current output block size remaining */
                     pState->out_blk_remain = out_buf_size;
@@ -2430,7 +2464,8 @@ static int mz_stat64(const char *path, struct __stat64 *buffer)
         if (local_header_filename_len != strlen(file_stat.m_filename))
             return mz_zip_set_error(pZip, MZ_ZIP_INVALID_HEADER_OR_CORRUPTED);
 
-        if ((local_header_ofs + MZ_ZIP_LOCAL_DIR_HEADER_SIZE + local_header_filename_len + local_header_extra_len + file_stat.m_comp_size) > pZip->m_archive_size)
+        if (!mz_zip_get_file_data_ofs(pZip, local_header_ofs, local_header_filename_len,
+                                      local_header_extra_len, file_stat.m_comp_size, NULL))
             return mz_zip_set_error(pZip, MZ_ZIP_INVALID_HEADER_OR_CORRUPTED);
 
         if (!mz_zip_array_resize(pZip, &file_data_array, MZ_MAX(local_header_filename_len, local_header_extra_len), MZ_FALSE))
