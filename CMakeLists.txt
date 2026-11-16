@@ -311,7 +311,7 @@ if(BUILD_TESTS)
   set(CMAKE_CXX_STANDARD 20)
   set(CMAKE_CXX_STANDARD_REQUIRED YES)
 
-  add_executable(catch_tests tests/main.cpp tests/catch_amalgamated.cpp)
+  add_executable(catch_tests tests/main.cpp tests/zip_corrupt_deflate_test.cpp tests/catch_amalgamated.cpp)
   if(BUILD_NO_STDIO)
     target_compile_definitions(catch_tests PRIVATE -DMINIZ_NO_STDIO)
   endif()
@@ -334,6 +334,15 @@ if(BUILD_TESTS)
 
   find_package(Python3 COMPONENTS Interpreter QUIET)
   if(Python3_Interpreter_FOUND)
+    add_executable(zip_resource_harness tests/zip_resource_harness.c)
+    target_link_libraries(zip_resource_harness miniz)
+    add_test(NAME zip_resource_properties
+             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/zip_resource_property_test.py
+                     $<TARGET_FILE:zip_resource_harness>)
+    set_tests_properties(zip_resource_properties PROPERTIES
+                         TIMEOUT 180
+                         ENVIRONMENT "ASAN_OPTIONS=detect_leaks=1:abort_on_error=1:strict_string_checks=1;UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1")
+
     add_executable(png_roundtrip_gen tests/png_roundtrip_gen.c)
     target_link_libraries(png_roundtrip_gen miniz)
     add_test(NAME png_roundtrip_python
@@ -365,4 +374,3 @@ set(INCLUDE_INSTALL_DIR "include")
 if(INSTALL_PROJECT)
   install(FILES ${INSTALL_HEADERS} DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/${PROJECT_NAME})
 endif()
-

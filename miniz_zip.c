@@ -1676,6 +1676,8 @@ static int mz_stat64(const char *path, struct __stat64 *buffer)
             }
             in_buf_size = (size_t)read_buf_avail;
             status = tinfl_decompress(&inflator, (mz_uint8 *)pRead_buf + read_buf_ofs, &in_buf_size, (mz_uint8 *)pBuf, (mz_uint8 *)pBuf + out_buf_ofs, &out_buf_size, TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF | (comp_remaining ? TINFL_FLAG_HAS_MORE_INPUT : 0));
+            if (status == TINFL_STATUS_FAILED)
+                mz_zip_set_error(pZip, MZ_ZIP_DECOMPRESSION_FAILED);
             read_buf_avail -= in_buf_size;
             read_buf_ofs += in_buf_size;
             out_buf_ofs += out_buf_size;
@@ -1923,6 +1925,8 @@ static int mz_stat64(const char *path, struct __stat64 *buffer)
 
                     in_buf_size = (size_t)read_buf_avail;
                     status = tinfl_decompress(&inflator, (const mz_uint8 *)pRead_buf + read_buf_ofs, &in_buf_size, (mz_uint8 *)pWrite_buf, pWrite_buf_cur, &out_buf_size, comp_remaining ? TINFL_FLAG_HAS_MORE_INPUT : 0);
+                    if (status == TINFL_STATUS_FAILED)
+                        mz_zip_set_error(pZip, MZ_ZIP_DECOMPRESSION_FAILED);
                     read_buf_avail -= in_buf_size;
                     read_buf_ofs += in_buf_size;
 
@@ -2200,6 +2204,8 @@ static int mz_stat64(const char *path, struct __stat64 *buffer)
                     /* Perform decompression */
                     in_buf_size = (size_t)pState->read_buf_avail;
                     pState->status = tinfl_decompress(&pState->inflator, (const mz_uint8 *)pState->pRead_buf + pState->read_buf_ofs, &in_buf_size, (mz_uint8 *)pState->pWrite_buf, pWrite_buf_cur, &out_buf_size, pState->comp_remaining ? TINFL_FLAG_HAS_MORE_INPUT : 0);
+                    if (pState->status == TINFL_STATUS_FAILED)
+                        mz_zip_set_error(pState->pZip, MZ_ZIP_DECOMPRESSION_FAILED);
                     pState->read_buf_avail -= in_buf_size;
                     pState->read_buf_ofs += in_buf_size;
 
