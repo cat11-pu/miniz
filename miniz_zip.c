@@ -1731,6 +1731,7 @@ static int mz_stat64(const char *path, struct __stat64 *buffer)
     {
         mz_zip_archive_file_stat file_stat;
         mz_uint64 alloc_size;
+        size_t read_buf_size = 0;
         void *pBuf;
 
         if (pSize)
@@ -1746,13 +1747,25 @@ static int mz_stat64(const char *path, struct __stat64 *buffer)
             return NULL;
         }
 
-        if (NULL == (pBuf = pZip->m_pAlloc(pZip->m_pAlloc_opaque, 1, (size_t)alloc_size)))
+        if ((!(flags & MZ_ZIP_FLAG_COMPRESSED_DATA)) && (file_stat.m_method) && (!pZip->m_pState->m_pMem))
+        {
+            read_buf_size = (size_t)MZ_MIN(file_stat.m_comp_size, (mz_uint64)MZ_ZIP_MAX_IO_BUF_SIZE);
+            if ((size_t)alloc_size > ((size_t)-1) - read_buf_size)
+            {
+                mz_zip_set_error(pZip, MZ_ZIP_INTERNAL_ERROR);
+                return NULL;
+            }
+        }
+
+        if (NULL == (pBuf = pZip->m_pAlloc(pZip->m_pAlloc_opaque, 1, (size_t)alloc_size + read_buf_size)))
         {
             mz_zip_set_error(pZip, MZ_ZIP_ALLOC_FAILED);
             return NULL;
         }
 
-        if (!mz_zip_reader_extract_to_mem_no_alloc1(pZip, file_index, pBuf, (size_t)alloc_size, flags, NULL, 0, &file_stat))
+        if (!mz_zip_reader_extract_to_mem_no_alloc1(pZip, file_index, pBuf, (size_t)alloc_size, flags,
+                                                    read_buf_size ? (mz_uint8 *)pBuf + (size_t)alloc_size : NULL,
+                                                    read_buf_size, &file_stat))
         {
             pZip->m_pFree(pZip->m_pAlloc_opaque, pBuf);
             return NULL;
@@ -1778,6 +1791,7 @@ static int mz_stat64(const char *path, struct __stat64 *buffer)
     mz_bool mz_zip_reader_extract_to_callback(mz_zip_archive *pZip, mz_uint file_index, mz_file_write_func pCallback, void *pOpaque, mz_uint flags)
     {
         int status = TINFL_STATUS_DONE;
+        mz_bool write_buf_combined = MZ_FALSE;
 #ifndef MINIZ_DISABLE_ZIP_READER_CRC32_CHECKS
         mz_uint file_crc32 = MZ_CRC32_INIT;
 #endif /* MINIZ_DISABLE_ZIP_READER_CRC32_CHECKS */
@@ -1828,8 +1842,14 @@ static int mz_stat64(const char *path, struct __stat64 *buffer)
         else
         {
             read_buf_size = MZ_MIN(file_stat.m_comp_size, (mz_uint64)MZ_ZIP_MAX_IO_BUF_SIZE);
-            if (NULL == (pRead_buf = pZip->m_pAlloc(pZip->m_pAlloc_opaque, 1, (size_t)read_buf_size)))
+            if (NULL == (pRead_buf = pZip->m_pAlloc(pZip->m_pAlloc_opaque, 1, (size_t)read_buf_size +
+                                                    (((flags & MZ_ZIP_FLAG_COMPRESSED_DATA) || (!file_stat.m_method)) ? 0 : TINFL_LZ_DICT_SIZE))))
                 return mz_zip_set_error(pZip, MZ_ZIP_ALLOC_FAILED);
+            if ((!(flags & MZ_ZIP_FLAG_COMPRESSED_DATA)) && (file_stat.m_method))
+            {
+                pWrite_buf = (mz_uint8 *)pRead_buf + read_buf_size;
+                write_buf_combined = MZ_TRUE;
+            }
 
             read_buf_avail = 0;
             comp_remaining = file_stat.m_comp_size;
@@ -1896,7 +1916,7 @@ static int mz_stat64(const char *path, struct __stat64 *buffer)
             tinfl_decompressor inflator;
             tinfl_init(&inflator);
 
-            if (NULL == (pWrite_buf = pZip->m_pAlloc(pZip->m_pAlloc_opaque, 1, TINFL_LZ_DICT_SIZE)))
+            if ((!pWrite_buf) && (NULL == (pWrite_buf = pZip->m_pAlloc(pZip->m_pAlloc_opaque, 1, TINFL_LZ_DICT_SIZE))))
             {
                 mz_zip_set_error(pZip, MZ_ZIP_ALLOC_FAILED);
                 status = TINFL_STATUS_FAILED;
@@ -1969,7 +1989,7 @@ static int mz_stat64(const char *path, struct __stat64 *buffer)
         if (!pZip->m_pState->m_pMem)
             pZip->m_pFree(pZip->m_pAlloc_opaque, pRead_buf);
 
-        if (pWrite_buf)
+        if ((pWrite_buf) && (!write_buf_combined))
             pZip->m_pFree(pZip->m_pAlloc_opaque, pWrite_buf);
 
         return status == TINFL_STATUS_DONE;

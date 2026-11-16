@@ -552,11 +552,28 @@ extern "C"
                         }
                         continue;
                     }
-#if MINIZ_USE_UNALIGNED_LOADS_AND_STORES
-                    else if ((counter >= 9) && (counter <= dist))
+#if MINIZ_USE_UNALIGNED_LOADS_AND_STORES || defined(MINIZ_UNALIGNED_USE_MEMCPY)
+                    else if ((counter <= 8) && (dist >= 8) &&
+                             ((size_t)(pOut_buf_end - pOut_buf_cur) >= 8) &&
+                             ((size_t)(pOut_buf_end - pSrc) >= 8))
                     {
-                        const mz_uint8 *pSrc_end = pSrc + (counter & ~7);
-                        do
+                        /* Most deflate matches are only 3-8 bytes. A single
+                         * fixed-size load/store is cheaper than the exact
+                         * byte loop; the extra output is overwritten later. */
+                        TINFL_MEMCPY(pOut_buf_cur, pSrc, 8);
+                        pOut_buf_cur += counter;
+                        continue;
+                    }
+                    else if ((counter >= 8) && (counter <= dist))
+                    {
+                        while (counter >= 32)
+                        {
+                            TINFL_MEMCPY(pOut_buf_cur, pSrc, 32);
+                            pOut_buf_cur += 32;
+                            pSrc += 32;
+                            counter -= 32;
+                        }
+                        while (counter >= 8)
                         {
 #ifdef MINIZ_UNALIGNED_USE_MEMCPY
                             memcpy(pOut_buf_cur, pSrc, sizeof(mz_uint32) * 2);
@@ -565,18 +582,15 @@ extern "C"
                             ((mz_uint32 *)pOut_buf_cur)[1] = ((const mz_uint32 *)pSrc)[1];
 #endif /* MINIZ_UNALIGNED_USE_MEMCPY */
                             pOut_buf_cur += 8;
-                        } while ((pSrc += 8) < pSrc_end);
-                        if ((counter &= 7) < 3)
-                        {
-                            if (counter)
-                            {
-                                pOut_buf_cur[0] = pSrc[0];
-                                if (counter > 1)
-                                    pOut_buf_cur[1] = pSrc[1];
-                                pOut_buf_cur += counter;
-                            }
-                            continue;
+                            pSrc += 8;
+                            counter -= 8;
                         }
+                        while (counter)
+                        {
+                            *pOut_buf_cur++ = *pSrc++;
+                            --counter;
+                        }
+                        continue;
                     }
 #endif /* MINIZ_USE_UNALIGNED_LOADS_AND_STORES */
                     while (counter > 2)

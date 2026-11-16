@@ -6,6 +6,18 @@
 
 #include "miniz_export.h"
 
+#ifndef MZ_FORCEINLINE
+#if defined(_MSC_VER)
+#define MZ_FORCEINLINE __forceinline
+#elif defined(__GNUC__)
+#define MZ_FORCEINLINE __inline__ __attribute__((__always_inline__))
+#elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 199901L
+#define MZ_FORCEINLINE inline
+#else
+#define MZ_FORCEINLINE
+#endif
+#endif
+
 /* ------------------- Types and macros */
 typedef unsigned char mz_uint8;
 typedef int16_t mz_int16;
@@ -62,7 +74,22 @@ typedef struct mz_dummy_time_t_tag
 #define MZ_CLEAR_ARR(obj) memset((obj), 0, sizeof(obj))
 #define MZ_CLEAR_PTR(obj) memset((obj), 0, sizeof(*obj))
 
-#if MINIZ_USE_UNALIGNED_LOADS_AND_STORES && MINIZ_LITTLE_ENDIAN
+#if MINIZ_LITTLE_ENDIAN && (MINIZ_USE_UNALIGNED_LOADS_AND_STORES || defined(MINIZ_UNALIGNED_USE_MEMCPY))
+static MZ_FORCEINLINE mz_uint16 mz_read_le16(const void *p)
+{
+    mz_uint16 v;
+    memcpy(&v, p, sizeof(v));
+    return v;
+}
+static MZ_FORCEINLINE mz_uint32 mz_read_le32(const void *p)
+{
+    mz_uint32 v;
+    memcpy(&v, p, sizeof(v));
+    return v;
+}
+#define MZ_READ_LE16(p) mz_read_le16(p)
+#define MZ_READ_LE32(p) mz_read_le32(p)
+#elif MINIZ_USE_UNALIGNED_LOADS_AND_STORES && MINIZ_LITTLE_ENDIAN
 #define MZ_READ_LE16(p) *((const mz_uint16 *)(p))
 #define MZ_READ_LE32(p) *((const mz_uint32 *)(p))
 #else

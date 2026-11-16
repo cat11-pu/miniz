@@ -114,6 +114,7 @@
 
 #include "miniz_export.h"
 
+#ifndef MZ_FORCEINLINE
 #if defined(_MSC_VER)
 #define MZ_FORCEINLINE __forceinline
 #elif defined(__GNUC__)
@@ -123,6 +124,7 @@
 #else
 #define MZ_FORCEINLINE
 #endif /* defined(__STRICT_ANSI__) */
+#endif
 
 /* Defines to completely disable specific portions of miniz.c:
    If all macros here are defined the only functionality remaining will be CRC-32 and adler-32. */
