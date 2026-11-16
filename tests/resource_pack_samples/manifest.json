@@ -1,0 +1,70 @@
+{
+  "malformed": [
+    {
+      "category": "texture",
+      "expected_entry_index": 0,
+      "expected_entry_offset": 3105,
+      "expected_error": "MZ_ZIP_DECOMPRESSION_FAILED",
+      "expected_error_code": 11,
+      "mutation": "deflate stream truncated",
+      "path": "texture_truncated_deflate.zip"
+    },
+    {
+      "category": "mesh",
+      "expected_entry_index": 0,
+      "expected_entry_offset": 1431,
+      "expected_error": "MZ_ZIP_DECOMPRESSION_FAILED",
+      "expected_error_code": 11,
+      "mutation": "invalid deflate block header",
+      "path": "mesh_corrupt_deflate.zip"
+    },
+    {
+      "category": "audio",
+      "expected_entry_index": null,
+      "expected_entry_offset": null,
+      "expected_error": "MZ_ZIP_INVALID_HEADER_OR_CORRUPTED",
+      "expected_error_code": 9,
+      "mutation": "central-directory filename length overruns directory",
+      "path": "audio_bad_central_dir.zip"
+    },
+    {
+      "category": "texture",
+      "expected_entry_index": 0,
+      "expected_entry_offset": 56,
+      "expected_error": "MZ_ZIP_INVALID_HEADER_OR_CORRUPTED",
+      "expected_error_code": 9,
+      "mutation": "zip64 uncompressed size UINT64_MAX",
+      "path": "texture_zip64_uncompressed_bomb.zip"
+    },
+    {
+      "category": "mesh",
+      "expected_entry_index": 0,
+      "expected_entry_offset": 58,
+      "expected_error": "MZ_ZIP_INVALID_HEADER_OR_CORRUPTED",
+      "expected_error_code": 9,
+      "mutation": "zip64 compressed size UINT64_MAX wraps offset arithmetic",
+      "path": "mesh_zip64_compressed_overflow.zip"
+    }
+  ],
+  "valid": {
+    "entries": [
+      {
+        "name": "textures/checker.rgba",
+        "sha256": "56837be1d9a7810caa91d238ffa587319e50d76563ee3df6658939d822ddf70a",
+        "uncompressed_size": 16384
+      },
+      {
+        "name": "meshes/hero.mesh",
+        "sha256": "4e1f6876203f3b43bb4ab0670dc1455aeef1bcfc4f90c3111ab1f6bbe779ba65",
+        "uncompressed_size": 3276
+      },
+      {
+        "name": "audio/beep.wav",
+        "sha256": "5b9f80d9debcad73c7101f6cbdee4a9cf3fe53ecb47e71ef8902df4a0e6614fb",
+        "uncompressed_size": 8236
+      }
+    ],
+    "path": "valid_resources.zip",
+    "sha256": "e7e7afb819a00754b9ad9f42159b6d7415f8733b6e13d45091ca5c6413dbf706"
+  }
+}

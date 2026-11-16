@@ -445,6 +445,251 @@ TEST_CASE("Zip reader zip64 local header offset out of bounds")
     mz_zip_reader_end(&zip);
 }
 
+struct single_entry_zip
+{
+    std::vector<unsigned char> bytes;
+    size_t central_dir_ofs = 0;
+};
+
+static void append_le16(std::vector<unsigned char> &out, unsigned value)
+{
+    out.push_back(static_cast<unsigned char>(value));
+    out.push_back(static_cast<unsigned char>(value >> 8));
+}
+
+static void append_le32(std::vector<unsigned char> &out, mz_uint32 value)
+{
+    for (int i = 0; i != 4; ++i)
+        out.push_back(static_cast<unsigned char>(value >> (i * 8)));
+}
+
+static single_entry_zip make_single_entry_zip(const char *name, mz_uint16 method,
+                                              const std::vector<unsigned char> &payload,
+                                              mz_uint32 crc, mz_uint32 comp_size,
+                                              mz_uint32 uncomp_size)
+{
+    single_entry_zip result;
+    const mz_uint16 name_len = static_cast<mz_uint16>(strlen(name));
+
+    append_le32(result.bytes, 0x04034b50);
+    append_le16(result.bytes, 20);
+    append_le16(result.bytes, 0);
+    append_le16(result.bytes, method);
+    append_le16(result.bytes, 0);
+    append_le16(result.bytes, 0);
+    append_le32(result.bytes, crc);
+    append_le32(result.bytes, comp_size);
+    append_le32(result.bytes, uncomp_size);
+    append_le16(result.bytes, name_len);
+    append_le16(result.bytes, 0);
+    result.bytes.insert(result.bytes.end(), name, name + name_len);
+    result.bytes.insert(result.bytes.end(), payload.begin(), payload.end());
+
+    result.central_dir_ofs = result.bytes.size();
+    append_le32(result.bytes, 0x02014b50);
+    append_le16(result.bytes, 20);
+    append_le16(result.bytes, 20);
+    append_le16(result.bytes, 0);
+    append_le16(result.bytes, method);
+    append_le16(result.bytes, 0);
+    append_le16(result.bytes, 0);
+    append_le32(result.bytes, crc);
+    append_le32(result.bytes, comp_size);
+    append_le32(result.bytes, uncomp_size);
+    append_le16(result.bytes, name_len);
+    append_le16(result.bytes, 0);
+    append_le16(result.bytes, 0);
+    append_le16(result.bytes, 0);
+    append_le16(result.bytes, 0);
+    append_le32(result.bytes, 0);
+    append_le32(result.bytes, 0);
+    result.bytes.insert(result.bytes.end(), name, name + name_len);
+
+    const mz_uint32 central_dir_size = static_cast<mz_uint32>(result.bytes.size() - result.central_dir_ofs);
+    append_le32(result.bytes, 0x06054b50);
+    append_le16(result.bytes, 0);
+    append_le16(result.bytes, 0);
+    append_le16(result.bytes, 1);
+    append_le16(result.bytes, 1);
+    append_le32(result.bytes, central_dir_size);
+    append_le32(result.bytes, static_cast<mz_uint32>(result.central_dir_ofs));
+    append_le16(result.bytes, 0);
+    return result;
+}
+
+TEST_CASE("Truncated resource deflate stream fails without hanging")
+{
+    /* 0x03 is a final fixed-Huffman block header with no symbol data.  The
+     * compressed stream ends one byte into the block. */
+    const single_entry_zip fixture = make_single_entry_zip(
+        "textures/truncated.rgba", MZ_DEFLATED, std::vector<unsigned char>(1, 0x03), 0, 1, 128);
+
+    mz_zip_archive zip = {};
+    REQUIRE(mz_zip_reader_init_mem(&zip, fixture.bytes.data(), fixture.bytes.size(), 0));
+
+    mz_zip_archive_file_stat stat;
+    REQUIRE(mz_zip_reader_file_stat(&zip, 0, &stat));
+    REQUIRE(stat.m_central_dir_ofs == 0);
+
+    std::vector<unsigned char> out(128);
+    REQUIRE_FALSE(mz_zip_reader_extract_to_mem(&zip, 0, out.data(), out.size(), 0));
+    REQUIRE(zip.m_last_error == MZ_ZIP_DECOMPRESSION_FAILED);
+    CHECK(mz_zip_get_last_error_file_index(&zip) == 0);
+    CHECK(mz_zip_get_last_error_entry_offset(&zip) == fixture.central_dir_ofs);
+
+    REQUIRE(mz_zip_reader_extract_to_heap(&zip, 0, nullptr, 0) == nullptr);
+    REQUIRE(zip.m_last_error == MZ_ZIP_DECOMPRESSION_FAILED);
+
+    auto *iter = mz_zip_reader_extract_iter_new(&zip, 0, 0);
+    REQUIRE(iter != nullptr);
+    unsigned char iter_buf[32];
+    CHECK(mz_zip_reader_extract_iter_read(iter, iter_buf, sizeof(iter_buf)) == 0);
+    REQUIRE(mz_zip_get_last_error(&zip) == MZ_ZIP_DECOMPRESSION_FAILED);
+    CHECK_FALSE(mz_zip_reader_extract_iter_free(iter));
+
+    mz_zip_reader_end(&zip);
+}
+
+TEST_CASE("Corrupt resource deflate stream returns an error")
+{
+    const std::vector<unsigned char> corrupt(8, 0xff);
+    const single_entry_zip fixture = make_single_entry_zip(
+        "meshes/corrupt.mesh", MZ_DEFLATED, corrupt, 0, static_cast<mz_uint32>(corrupt.size()), 128);
+
+    mz_zip_archive zip = {};
+    REQUIRE(mz_zip_reader_init_mem(&zip, fixture.bytes.data(), fixture.bytes.size(), 0));
+
+    std::vector<unsigned char> out(128);
+    REQUIRE_FALSE(mz_zip_reader_extract_to_mem(&zip, 0, out.data(), out.size(), 0));
+    REQUIRE(zip.m_last_error == MZ_ZIP_DECOMPRESSION_FAILED);
+    CHECK(mz_zip_get_last_error_file_index(&zip) == 0);
+    CHECK(mz_zip_get_last_error_entry_offset(&zip) == fixture.central_dir_ofs);
+
+    mz_zip_reader_end(&zip);
+}
+
+TEST_CASE("Illegal central directory entry is rejected")
+{
+    single_entry_zip fixture = make_single_entry_zip(
+        "audio/bad.wav", 0, std::vector<unsigned char>(4, 'a'), 0, 4, 4);
+
+    /* Make the central directory filename length overrun the claimed central
+     * directory size. */
+    fixture.bytes[fixture.central_dir_ofs + 28] = 0xff;
+    fixture.bytes[fixture.central_dir_ofs + 29] = 0xff;
+
+    mz_zip_archive zip = {};
+    REQUIRE_FALSE(mz_zip_reader_init_mem(&zip, fixture.bytes.data(), fixture.bytes.size(), 0));
+    REQUIRE(zip.m_last_error == MZ_ZIP_INVALID_HEADER_OR_CORRUPTED);
+    CHECK(mz_zip_get_last_error_file_index(&zip) == MZ_UINT32_MAX);
+}
+
+TEST_CASE("Zip64 resource metadata cannot wrap bounds or over-allocate")
+{
+    /* Central-directory comp_size is 0xffffffff and the zip64 field reports
+     * UINT64_MAX.  The old additive check wrapped and then treated the archive
+     * as containing the entire address space. */
+    static const unsigned char comp_size_overflow[] = {
+        0x50, 0x4b, 0x03, 0x04, 0x2d, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0xff, 0x07, 0x00, 0x00, 0x00, 0x74, 0x65, 0x78, 0x2e, 0x70, 0x6e,
+        0x67, 0x03, 0x00, 0x50, 0x4b, 0x01, 0x02, 0x2d, 0x00, 0x2d, 0x00, 0x00,
+        0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff,
+        0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 0x07, 0x00, 0x0c, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x74, 0x65, 0x78, 0x2e, 0x70, 0x6e, 0x67, 0x01, 0x00, 0x08, 0x00,
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x50, 0x4b, 0x05, 0x06,
+        0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x41, 0x00, 0x00, 0x00,
+        0x27, 0x00, 0x00, 0x00, 0x00, 0x00,
+    };
+
+    /* comp_size is 2, while the zip64 uncompressed size is UINT64_MAX.  No
+     * allocation may be attempted for the impossible output size. */
+    static const unsigned char uncomp_size_overflow[] = {
+        0x50, 0x4b, 0x03, 0x04, 0x2d, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0xff, 0x07, 0x00, 0x00, 0x00, 0x74, 0x65, 0x78, 0x2e, 0x70, 0x6e,
+        0x67, 0x03, 0x00, 0x50, 0x4b, 0x01, 0x02, 0x2d, 0x00, 0x2d, 0x00, 0x00,
+        0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02,
+        0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0x07, 0x00, 0x0c, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x74, 0x65, 0x78, 0x2e, 0x70, 0x6e, 0x67, 0x01, 0x00, 0x08, 0x00,
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x50, 0x4b, 0x05, 0x06,
+        0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x41, 0x00, 0x00, 0x00,
+        0x27, 0x00, 0x00, 0x00, 0x00, 0x00,
+    };
+
+    SECTION("compressed size overflow")
+    {
+        mz_zip_archive zip = {};
+        REQUIRE(mz_zip_reader_init_mem(&zip, comp_size_overflow, sizeof(comp_size_overflow), 0));
+        mz_zip_archive_file_stat stat;
+        REQUIRE_FALSE(mz_zip_reader_file_stat(&zip, 0, &stat));
+        REQUIRE(zip.m_last_error == MZ_ZIP_INVALID_HEADER_OR_CORRUPTED);
+        CHECK(mz_zip_get_last_error_file_index(&zip) == 0);
+        CHECK(mz_zip_get_last_error_entry_offset(&zip) == 39);
+        REQUIRE(mz_zip_reader_extract_to_heap(&zip, 0, nullptr, 0) == nullptr);
+        REQUIRE(zip.m_last_error == MZ_ZIP_INVALID_HEADER_OR_CORRUPTED);
+        mz_zip_reader_end(&zip);
+    }
+
+    SECTION("uncompressed size overflow")
+    {
+        mz_zip_archive zip = {};
+        REQUIRE(mz_zip_reader_init_mem(&zip, uncomp_size_overflow, sizeof(uncomp_size_overflow), 0));
+        mz_zip_archive_file_stat stat;
+        REQUIRE_FALSE(mz_zip_reader_file_stat(&zip, 0, &stat));
+        REQUIRE(zip.m_last_error == MZ_ZIP_INVALID_HEADER_OR_CORRUPTED);
+        REQUIRE(mz_zip_reader_extract_to_heap(&zip, 0, nullptr, 0) == nullptr);
+        REQUIRE(zip.m_last_error == MZ_ZIP_INVALID_HEADER_OR_CORRUPTED);
+        mz_zip_reader_end(&zip);
+    }
+}
+
+TEST_CASE("Game resource packs round-trip byte for byte")
+{
+    std::vector<unsigned char> texture(64 * 64 * 4);
+    for (size_t i = 0; i != texture.size(); ++i)
+        texture[i] = static_cast<unsigned char>((i * 37 + i / 11) & 0xff);
+
+    std::vector<unsigned char> mesh(4096);
+    for (size_t i = 0; i != mesh.size(); ++i)
+        mesh[i] = static_cast<unsigned char>((i * 13 + 7) & 0xff);
+
+    std::vector<unsigned char> audio(8192);
+    for (size_t i = 0; i != audio.size(); ++i)
+        audio[i] = static_cast<unsigned char>((i / 2) & 0xff);
+
+    mz_zip_archive writer = {};
+    REQUIRE(mz_zip_writer_init_heap(&writer, 0, 0));
+    REQUIRE(mz_zip_writer_add_mem(&writer, "textures/checker.rgba", texture.data(), texture.size(), MZ_BEST_COMPRESSION));
+    REQUIRE(mz_zip_writer_add_mem(&writer, "meshes/hero.mesh", mesh.data(), mesh.size(), MZ_BEST_COMPRESSION));
+    REQUIRE(mz_zip_writer_add_mem(&writer, "audio/beep.wav", audio.data(), audio.size(), MZ_BEST_COMPRESSION));
+
+    void *archive = nullptr;
+    size_t archive_size = 0;
+    REQUIRE(mz_zip_writer_finalize_heap_archive(&writer, &archive, &archive_size));
+    REQUIRE(mz_zip_writer_end(&writer));
+
+    mz_zip_archive reader = {};
+    REQUIRE(mz_zip_reader_init_mem(&reader, archive, archive_size, 0));
+
+    const char *names[] = { "textures/checker.rgba", "meshes/hero.mesh", "audio/beep.wav" };
+    const std::vector<unsigned char> *expected[] = { &texture, &mesh, &audio };
+    for (size_t i = 0; i != 3; ++i)
+    {
+        size_t size = 0;
+        void *data = mz_zip_reader_extract_file_to_heap(&reader, names[i], &size, 0);
+        REQUIRE(data != nullptr);
+        REQUIRE(size == expected[i]->size());
+        REQUIRE(memcmp(data, expected[i]->data(), size) == 0);
+        mz_free(data);
+    }
+
+    REQUIRE(mz_zip_reader_end(&reader));
+    mz_free(archive);
+}
+
 TEST_CASE("Tinfl / tdefl tests")
 {
     SECTION("simple_test1")

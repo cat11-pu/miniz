@@ -168,6 +168,14 @@ extern "C"
         mz_zip_type m_zip_type;
         mz_zip_error m_last_error;
 
+        /* Context for the last error: the absolute archive offset of the
+         * offending entry's central-directory record, and its file index.
+         * m_last_error_file_index is MZ_UINT32_MAX when the error did not
+         * occur while processing a specific entry (for example, while parsing
+         * the EOCD record). */
+        mz_uint32 m_last_error_file_index;
+        mz_uint64 m_last_error_entry_ofs;
+
         mz_uint64 m_file_offset_alignment;
 
         mz_alloc_func m_pAlloc;
@@ -258,6 +266,15 @@ extern "C"
     MINIZ_EXPORT mz_zip_error mz_zip_clear_last_error(mz_zip_archive *pZip);
     MINIZ_EXPORT mz_zip_error mz_zip_get_last_error(mz_zip_archive *pZip);
     MINIZ_EXPORT const char *mz_zip_get_error_string(mz_zip_error mz_err);
+
+    /* Returns the file index associated with the last error, or MZ_UINT32_MAX
+     * if the error was not tied to a particular archive entry. */
+    MINIZ_EXPORT mz_uint32 mz_zip_get_last_error_file_index(mz_zip_archive *pZip);
+
+    /* Returns the absolute archive byte offset of the offending entry's
+     * central-directory record, or 0 if the error was not tied to a particular
+     * archive entry. */
+    MINIZ_EXPORT mz_uint64 mz_zip_get_last_error_entry_offset(mz_zip_archive *pZip);
 
     /* MZ_TRUE if the archive file entry is a directory entry. */
     MINIZ_EXPORT mz_bool mz_zip_reader_is_file_a_directory(mz_zip_archive *pZip, mz_uint file_index);

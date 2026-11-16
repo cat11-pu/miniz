@@ -321,6 +321,10 @@ if(BUILD_TESTS)
 
   add_test(NAME catch_tests COMMAND $<TARGET_FILE:catch_tests>)
 
+  add_executable(resource_pack_stress tests/resource_pack_stress.c)
+  target_link_libraries(resource_pack_stress miniz)
+  add_test(NAME resource_pack_stress COMMAND $<TARGET_FILE:resource_pack_stress> 5000)
+
   # Optional PNG round-trip tests: decode PNGs written by miniz with libpng and,
   # if available, with Python PNG libraries (Pillow / pypng).
   find_package(PNG QUIET)
@@ -365,4 +369,3 @@ set(INCLUDE_INSTALL_DIR "include")
 if(INSTALL_PROJECT)
   install(FILES ${INSTALL_HEADERS} DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/${PROJECT_NAME})
 endif()
-
