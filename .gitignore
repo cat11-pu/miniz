@@ -2,3 +2,7 @@
 /amalgamation
 /bin
 build-sanitize
+/build
+/build_*
+/test.zip
+/test2.zip

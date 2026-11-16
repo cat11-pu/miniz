@@ -8,7 +8,7 @@ miniz_export_h = configure_file(output: 'miniz_export.h',
                                 configuration: cfg)
 
 libminiz = static_library('miniz',
-                          miniz_export_h, 'miniz.c', 'miniz_zip.c', 'miniz_tinfl.c', 'miniz_tdef.c',
+                          miniz_export_h, 'miniz.c', 'miniz_zip.c', 'miniz_tinfl.c', 'miniz_tdef.c', 'miniz_pack.c',
                           include_directories: miniz_includes)
 
 miniz_dependency = declare_dependency(link_with: libminiz,

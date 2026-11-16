@@ -101,6 +101,349 @@ TEST_CASE("ZIP writer reports data descriptor write failures")
         REQUIRE(end_result);
     }
 }
+
+#include "miniz_pack.h"
+#ifndef MINIZ_NO_TIME
+static MZ_TIME_T pack_fixed_time()
+{
+    struct tm tm = {};
+    tm.tm_year = 2024 - 1900;
+    tm.tm_mon = 6 - 1;
+    tm.tm_mday = 15;
+    tm.tm_hour = 12;
+    tm.tm_min = 30;
+    tm.tm_sec = 0;
+    tm.tm_isdst = -1;
+    return mktime(&tm);
+}
+#endif
+
+static const char *kPackNames[] = {"textures/atlas.tex", "shaders/main.shader", "audio/sfx.bin", "config/levels.json"};
+
+static std::vector<std::vector<mz_uint8>> make_pack_payloads()
+{
+    std::vector<std::vector<mz_uint8>> payloads;
+    const mz_uint32 sizes[] = {4096, 17, 1024, 128};
+    for (size_t i = 0; i < 4; i++)
+    {
+        std::vector<mz_uint8> data(sizes[i]);
+        mz_uint32 state = (mz_uint32)(i + 1u) * 2654435761u;
+        for (mz_uint32 j = 0; j < sizes[i]; j++)
+        {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            /* Repeating 64-byte pattern: compressible while still exercising
+             * deflate across several match distances. */
+            data[j] = (mz_uint8)(state >> 24);
+            if (j >= 64)
+                data[j] = data[j - 64];
+        }
+        payloads.push_back(std::move(data));
+    }
+    return payloads;
+}
+
+static mz_bool build_pack(const std::vector<std::vector<mz_uint8>> &payloads, int level, mz_uint32 alignment, void **buf, size_t *size)
+{
+    std::vector<mz_pack_entry> entries;
+    for (size_t i = 0; i < payloads.size(); i++)
+    {
+        mz_pack_entry entry;
+        entry.name = kPackNames[i];
+        entry.data = payloads[i].data();
+        entry.size = payloads[i].size();
+        entries.push_back(entry);
+    }
+#ifdef MINIZ_NO_TIME
+    return mz_pack_build(entries.data(), entries.size(), level, alignment, MZ_TIME_T{}, buf, size);
+#else
+    return mz_pack_build(entries.data(), entries.size(), level, alignment, pack_fixed_time(), buf, size);
+#endif
+}
+
+TEST_CASE("Reproducible pack writer")
+{
+    auto payloads = make_pack_payloads();
+
+    SECTION("same inputs produce byte identical archives")
+    {
+        void *buf1 = nullptr;
+        void *buf2 = nullptr;
+        size_t size1 = 0, size2 = 0;
+        REQUIRE(build_pack(payloads, MZ_BEST_COMPRESSION, 0, &buf1, &size1));
+        REQUIRE(build_pack(payloads, MZ_BEST_COMPRESSION, 0, &buf2, &size2));
+        REQUIRE(size1 == size2);
+        REQUIRE(memcmp(buf1, buf2, size1) == 0);
+        mz_free(buf1);
+        mz_free(buf2);
+    }
+
+    SECTION("compression level changes the output deterministically")
+    {
+        /* Mixed text with long-distance matches: level 9 spends more effort
+         * and packs tighter than level 1, unlike pure repeating patterns. */
+        std::vector<mz_uint8> text;
+        const std::string sentence = "the quick brown fox jumps over the lazy dog. ";
+        for (int block = 0; block < 200; block++)
+        {
+            std::string line = sentence;
+            for (char &c : line)
+                c = (char)(c ^ (block & 7));
+            text.insert(text.end(), line.begin(), line.end());
+        }
+        mz_pack_entry text_entry;
+        text_entry.name = "mixed.txt";
+        text_entry.data = text.data();
+        text_entry.size = text.size();
+
+        void *stored = nullptr;
+        void *fast = nullptr;
+        void *best = nullptr;
+        size_t stored_size = 0, fast_size = 0, best_size = 0;
+#ifdef MINIZ_NO_TIME
+        MZ_TIME_T fixed = MZ_TIME_T{};
+#else
+        MZ_TIME_T fixed = pack_fixed_time();
+#endif
+        REQUIRE(mz_pack_build(&text_entry, 1, MZ_NO_COMPRESSION, 0, fixed, &stored, &stored_size));
+        REQUIRE(mz_pack_build(&text_entry, 1, MZ_BEST_SPEED, 0, fixed, &fast, &fast_size));
+        REQUIRE(mz_pack_build(&text_entry, 1, MZ_BEST_COMPRESSION, 0, fixed, &best, &best_size));
+        /* Compressible random-ish payloads: deflate shrinks the big entry. */
+        REQUIRE(fast_size < stored_size);
+        REQUIRE(best_size <= fast_size);
+        bool level_outputs_differ = (fast_size != best_size) || (memcmp(fast, best, fast_size) != 0);
+        REQUIRE(level_outputs_differ);
+        /* Each level is itself reproducible. */
+        void *best2 = nullptr;
+        size_t best2_size = 0;
+        REQUIRE(mz_pack_build(&text_entry, 1, MZ_BEST_COMPRESSION, 0, fixed, &best2, &best2_size));
+        REQUIRE(best2_size == best_size);
+        REQUIRE(memcmp(best, best2, best_size) == 0);
+        mz_free(stored);
+        mz_free(fast);
+        mz_free(best);
+        mz_free(best2);
+    }
+
+    SECTION("entries stay in insertion order")
+    {
+        void *buf = nullptr;
+        size_t size = 0;
+        REQUIRE(build_pack(payloads, MZ_DEFAULT_COMPRESSION, 0, &buf, &size));
+
+        mz_zip_archive reader = {};
+        REQUIRE(mz_zip_reader_init_mem(&reader, buf, size, MZ_ZIP_FLAG_DO_NOT_SORT_CENTRAL_DIRECTORY));
+        REQUIRE(reader.m_total_files == payloads.size());
+        for (mz_uint32 i = 0; i < reader.m_total_files; i++)
+        {
+            mz_zip_archive_file_stat stat;
+            REQUIRE(mz_zip_reader_file_stat(&reader, i, &stat));
+            REQUIRE(std::string(stat.m_filename) == kPackNames[i]);
+        }
+        REQUIRE(mz_zip_reader_end(&reader));
+        mz_free(buf);
+    }
+
+    SECTION("aligned entries land on requested offsets and stay reproducible")
+    {
+        const mz_uint32 alignment = 4096;
+        void *buf = nullptr;
+        size_t size = 0;
+        REQUIRE(build_pack(payloads, MZ_DEFAULT_COMPRESSION, alignment, &buf, &size));
+
+        mz_zip_archive reader = {};
+        REQUIRE(mz_zip_reader_init_mem(&reader, buf, size, MZ_ZIP_FLAG_DO_NOT_SORT_CENTRAL_DIRECTORY));
+        for (mz_uint32 i = 0; i < reader.m_total_files; i++)
+        {
+            mz_zip_archive_file_stat stat;
+            REQUIRE(mz_zip_reader_file_stat(&reader, i, &stat));
+            REQUIRE((stat.m_local_header_ofs % alignment) == 0);
+        }
+        REQUIRE(mz_zip_reader_end(&reader));
+
+        void *buf2 = nullptr;
+        size_t size2 = 0;
+        REQUIRE(build_pack(payloads, MZ_DEFAULT_COMPRESSION, alignment, &buf2, &size2));
+        REQUIRE(size2 == size);
+        REQUIRE(memcmp(buf, buf2, size) == 0);
+        mz_free(buf);
+        mz_free(buf2);
+    }
+
+    SECTION("round trip preserves every entry byte for byte")
+    {
+        void *buf = nullptr;
+        size_t size = 0;
+        REQUIRE(build_pack(payloads, MZ_UBER_COMPRESSION, 64, &buf, &size));
+
+        mz_zip_archive reader = {};
+        REQUIRE(mz_zip_reader_init_mem(&reader, buf, size, 0));
+        for (size_t i = 0; i < payloads.size(); i++)
+        {
+            size_t extracted_size = 0;
+            void *extracted = mz_zip_reader_extract_file_to_heap(&reader, kPackNames[i], &extracted_size, 0);
+            REQUIRE(extracted != nullptr);
+            REQUIRE(extracted_size == payloads[i].size());
+            REQUIRE(memcmp(extracted, payloads[i].data(), extracted_size) == 0);
+            mz_free(extracted);
+        }
+        REQUIRE(mz_zip_reader_end(&reader));
+        mz_free(buf);
+    }
+
+    SECTION("boundary cases: empty file, directory entry and empty pack set")
+    {
+        mz_pack_entry entries[3];
+        entries[0].name = "empty.bin";
+        entries[0].data = nullptr;
+        entries[0].size = 0;
+        const mz_uint8 one_byte[] = {0x5A};
+        entries[1].name = "dir/";
+        entries[1].data = nullptr;
+        entries[1].size = 0;
+        entries[2].name = "one.bin";
+        entries[2].data = one_byte;
+        entries[2].size = sizeof(one_byte);
+
+        void *buf = nullptr;
+        size_t size = 0;
+#ifdef MINIZ_NO_TIME
+        REQUIRE(mz_pack_build(entries, 3, MZ_DEFAULT_COMPRESSION, 0, MZ_TIME_T{}, &buf, &size));
+#else
+        REQUIRE(mz_pack_build(entries, 3, MZ_DEFAULT_COMPRESSION, 0, pack_fixed_time(), &buf, &size));
+#endif
+
+        mz_zip_archive reader = {};
+        REQUIRE(mz_zip_reader_init_mem(&reader, buf, size, 0));
+        REQUIRE(reader.m_total_files == 3);
+        mz_zip_archive_file_stat stat;
+        REQUIRE(mz_zip_reader_file_stat(&reader, 0, &stat));
+        REQUIRE(stat.m_uncomp_size == 0);
+        REQUIRE(mz_zip_reader_file_stat(&reader, 1, &stat));
+        REQUIRE(std::string(stat.m_filename) == "dir/");
+        REQUIRE(mz_zip_reader_file_stat(&reader, 2, &stat));
+        REQUIRE(stat.m_uncomp_size == 1);
+        REQUIRE(mz_zip_reader_end(&reader));
+        mz_free(buf);
+
+        REQUIRE_FALSE(mz_pack_build(nullptr, 0, MZ_DEFAULT_COMPRESSION, 0
+#ifdef MINIZ_NO_TIME
+                                    , MZ_TIME_T{}
+#else
+                                    , pack_fixed_time()
+#endif
+                                    , &buf, &size));
+    }
+
+    SECTION("invalid arguments are rejected without an archive")
+    {
+#ifdef MINIZ_NO_TIME
+        MZ_TIME_T fixed = MZ_TIME_T{};
+#else
+        MZ_TIME_T fixed = pack_fixed_time();
+#endif
+        REQUIRE(mz_pack_writer_create(11, 0, fixed) == nullptr);
+        REQUIRE(mz_pack_writer_create(-2, 0, fixed) == nullptr);
+        REQUIRE(mz_pack_writer_create(MZ_DEFAULT_COMPRESSION, 3, fixed) == nullptr); /* not a power of two */
+
+        mz_pack_writer *writer = mz_pack_writer_create(MZ_DEFAULT_COMPRESSION, 0, fixed);
+        REQUIRE(writer != nullptr);
+        REQUIRE_FALSE(mz_pack_add_entry(writer, nullptr, "x", 1));
+        REQUIRE_FALSE(mz_pack_add_entry(writer, "x.bin", nullptr, 4));
+        REQUIRE(mz_pack_get_error(writer) == MZ_ZIP_INVALID_PARAMETER);
+        mz_pack_writer_destroy(writer);
+    }
+
+    SECTION("10000 consecutive packs hold no outstanding allocations")
+    {
+        struct alloc_guard
+        {
+            long live = 0;
+            long peak = 0;
+            long total = 0;
+        };
+
+        auto counting_alloc = [](void *opaque, size_t items, size_t size) -> void * {
+            auto *g = static_cast<alloc_guard *>(opaque);
+            void *p = malloc(items * size);
+            if (p != nullptr)
+            {
+                g->live++;
+                g->total++;
+                g->peak = std::max(g->peak, g->live);
+            }
+            return p;
+        };
+        auto counting_realloc = [](void *opaque, void *address, size_t items, size_t size) -> void * {
+            auto *g = static_cast<alloc_guard *>(opaque);
+            void *p = realloc(address, items * size);
+            if (p != nullptr && address == nullptr)
+            {
+                g->live++;
+                g->total++;
+                g->peak = std::max(g->peak, g->live);
+            }
+            return p;
+        };
+        auto counting_free = [](void *opaque, void *address) {
+            auto *g = static_cast<alloc_guard *>(opaque);
+            if (address != nullptr)
+                g->live--;
+            free(address);
+        };
+
+        alloc_guard guard;
+        const int iterations = 10000;
+        size_t reference_size = 0;
+        void *reference = nullptr;
+        long first_iteration_allocs = 0;
+        for (int i = 0; i < iterations; i++)
+        {
+            long allocs_before = guard.total;
+#ifdef MINIZ_NO_TIME
+            mz_pack_writer *writer = mz_pack_writer_create_with_allocs(MZ_BEST_SPEED, 256, MZ_TIME_T{}, counting_alloc, counting_realloc, counting_free, &guard);
+#else
+            mz_pack_writer *writer = mz_pack_writer_create_with_allocs(MZ_BEST_SPEED, 256, pack_fixed_time(), counting_alloc, counting_realloc, counting_free, &guard);
+#endif
+            REQUIRE(writer != nullptr);
+            for (size_t e = 0; e < payloads.size(); e++)
+                REQUIRE(mz_pack_add_entry(writer, kPackNames[e], payloads[e].data(), payloads[e].size()));
+
+            void *buf = nullptr;
+            size_t size = 0;
+            REQUIRE(mz_pack_finish(writer, &buf, &size));
+            mz_pack_writer_destroy(writer);
+
+            /* The finalized buffer is an outstanding tracked allocation until
+             * the caller releases it through the matching free callback. */
+            REQUIRE(guard.live == 1);
+            if (i == 0)
+            {
+                reference_size = size;
+                reference = malloc(size);
+                REQUIRE(reference != nullptr);
+                memcpy(reference, buf, size);
+            }
+            else
+            {
+                REQUIRE(size == reference_size);
+                REQUIRE(memcmp(buf, reference, size) == 0);
+            }
+            counting_free(&guard, buf);
+            REQUIRE(guard.live == 0);
+            if (i == 0)
+                first_iteration_allocs = guard.total - allocs_before;
+            else
+                REQUIRE((guard.total - allocs_before) == first_iteration_allocs);
+        }
+
+        free(reference);
+        REQUIRE(guard.live == 0);
+        REQUIRE(guard.peak > 0);
+        REQUIRE(guard.total == first_iteration_allocs * static_cast<long>(iterations));
+    }
+}
 #endif
 
 #ifndef MINIZ_NO_STDIO

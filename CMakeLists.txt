@@ -138,7 +138,7 @@ if(AMALGAMATE_SOURCES)
 	)
 else(AMALGAMATE_SOURCES)
   include(GenerateExportHeader)
-  set(miniz_SOURCE miniz.c miniz_zip.c miniz_tinfl.c miniz_tdef.c)
+  set(miniz_SOURCE miniz.c miniz_zip.c miniz_tinfl.c miniz_tdef.c miniz_pack.c)
   add_library(${PROJECT_NAME} ${miniz_SOURCE})
   generate_export_header(${PROJECT_NAME})
 
